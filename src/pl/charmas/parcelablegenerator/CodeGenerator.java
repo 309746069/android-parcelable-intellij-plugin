@@ -17,7 +17,9 @@ package pl.charmas.parcelablegenerator;
 
 import com.intellij.psi.*;
 import com.intellij.psi.codeStyle.JavaCodeStyleManager;
+import com.intellij.psi.util.PsiUtil;
 import pl.charmas.parcelablegenerator.typeserializers.*;
+import pl.charmas.parcelablegenerator.util.PsiUtils;
 
 import java.util.List;
 
@@ -27,6 +29,7 @@ import java.util.List;
  */
 public class CodeGenerator {
     public static final String CREATOR_NAME = "CREATOR";
+    public static final String TYPE_PARCEL = "android.os.Parcel";
 
     private final PsiClass mClass;
     private final List<PsiField> mFields;
@@ -40,11 +43,10 @@ public class CodeGenerator {
                 new BundleSerializerFactory(),
                 new DateSerializerFactory(),
                 new EnumerationSerializerFactory(),
-                new ParcelableListSerializerFactory(),
                 new PrimitiveTypeSerializerFactory(),
                 new PrimitiveArraySerializerFactory(),
-                new ListSerializerFactory(),
                 new ParcelableSerializerFactory(),
+                new ListSerializerFactory(),
                 new SerializableSerializerFactory()
         );
     }
@@ -66,10 +68,14 @@ public class CodeGenerator {
     private String generateConstructor(List<PsiField> fields, PsiClass psiClass) {
         String className = psiClass.getName();
 
-        StringBuilder sb = new StringBuilder("private ");
+        StringBuilder sb = new StringBuilder("protected ");
 
         // Create the Parcelable-required constructor
         sb.append(className).append("(android.os.Parcel in) {");
+
+        if (hasParcelableSuperclass() && hasParcelableSuperConstructor()) {
+            sb.append("super(in);");
+        }
 
         // Creates all of the deserialization methods for the given fields
         for (PsiField field : fields) {
@@ -80,9 +86,23 @@ public class CodeGenerator {
         return sb.toString();
     }
 
+    private boolean hasParcelableSuperConstructor() {
+        PsiMethod[] constructors = mClass.getSuperClass() != null ? mClass.getSuperClass().getConstructors() : new PsiMethod[0];
+        for (PsiMethod constructor : constructors) {
+            PsiParameterList parameterList = constructor.getParameterList();
+            if (parameterList.getParametersCount() == 1
+                    && parameterList.getParameters()[0].getType().getCanonicalText().equals(TYPE_PARCEL)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private String generateWriteToParcel(List<PsiField> fields) {
         StringBuilder sb = new StringBuilder("@Override public void writeToParcel(android.os.Parcel dest, int flags) {");
-
+        if (hasParcelableSuperclass() && hasSuperMethod("writeToParcel")) {
+            sb.append("super.writeToParcel(dest, flags);");
+        }
         for (PsiField field : fields) {
             sb.append(getSerializerForType(field).writeValue(field, "dest", "flags"));
         }
@@ -90,6 +110,21 @@ public class CodeGenerator {
         sb.append("}");
 
         return sb.toString();
+    }
+
+    private boolean hasSuperMethod(String methodName) {
+        if (methodName == null) return false;
+
+        PsiMethod[] superclassMethods = mClass.getSuperClass() != null ? mClass.getAllMethods() : new PsiMethod[0];
+        for (PsiMethod superclassMethod : superclassMethods) {
+            if (superclassMethod.getBody() == null) continue;
+
+            String name = superclassMethod.getName();
+            if (name != null && name.equals(methodName)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private TypeSerializer getSerializerForType(PsiField field) {
@@ -140,8 +175,19 @@ public class CodeGenerator {
         makeClassImplementParcelable(elementFactory);
     }
 
+    private boolean hasParcelableSuperclass() {
+        PsiClassType[] superTypes = mClass.getSuperTypes();
+        for (PsiClassType superType : superTypes) {
+            if (PsiUtils.isOfType(superType, "android.os.Parcelable")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * Strips the
+     *
      * @param psiClass
      */
     private void removeExistingParcelableImplementation(PsiClass psiClass) {
@@ -155,24 +201,24 @@ public class CodeGenerator {
             }
         }
 
-        findAndRemoveMethod(psiClass, psiClass.getName(), "android.os.Parcel");
+        findAndRemoveMethod(psiClass, psiClass.getName(), TYPE_PARCEL);
         findAndRemoveMethod(psiClass, "describeContents");
-        findAndRemoveMethod(psiClass, "writeToParcel", "android.os.Parcel", "int");
+        findAndRemoveMethod(psiClass, "writeToParcel", TYPE_PARCEL, "int");
     }
 
     private String generateDefaultConstructor(PsiClass clazz) {
         // Check for any constructors; if none exist, we'll make a default one
         if (clazz.getConstructors().length == 0) {
             // No constructors exist, make a default one for convenience
-            StringBuilder sb = new StringBuilder();
-            sb.append("public ").append(clazz.getName()).append("(){}").append('\n');
-            return sb.toString();
+            return "public " + clazz.getName() + "(){}" + '\n';
         } else {
-        return null;
+            return null;
         }
     }
 
     private void makeClassImplementParcelable(PsiElementFactory elementFactory) {
+        if (hasParcelableSuperclass()) return;
+
         final PsiClassType[] implementsListTypes = mClass.getImplementsListTypes();
         final String implementsType = "android.os.Parcelable";
 
